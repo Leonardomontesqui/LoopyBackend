@@ -61,4 +61,51 @@ def delete_recording(recording_id: str):
         return result
     except Exception as e:
         print(f"Error deleting recording: {e}")
+        return None
+
+def get_all_recordings():
+    """Get all recordings from Supabase"""
+    try:
+        result = supabase.table('recordings').select('*').execute()
+        return result
+    except Exception as e:
+        print(f"Error getting recordings: {e}")
+        return None
+
+def save_processed_session(session_data: Dict):
+    """Saves the analyzed session data to the 'posthog' table using an upsert."""
+    try:
+        # Extract just the error messages for the 'error_tags' column
+        error_tags = [error['message'] for error in session_data.get('errors', [])]
+
+        data_to_insert = {
+            'video_link': session_data.get('embed_url'),
+            'session_id': session_data.get('session_id'),
+            'error_tags': error_tags,
+            'title': session_data.get('title'),
+            'description': session_data.get('description'),
+            'start_time': session_data.get('start_time'),
+            'end_time': session_data.get('end_time')
+        }
+
+        # Remove keys with None values so they don't override database defaults
+        data_to_insert = {k: v for k, v in data_to_insert.items() if v is not None}
+        
+        # Upsert the data. If session_id exists, it won't create a new row.
+        result = supabase.table('posthog').upsert(
+            data_to_insert, 
+            on_conflict='session_id'
+        ).execute()
+        
+        # Check for and log any API errors from the upsert
+        if result.data:
+            print(f"Successfully upserted session {session_data.get('session_id')} to Supabase.")
+        else:
+             print(f"Upsert call for session {session_data.get('session_id')} returned no data, which may indicate an issue.")
+        
+        return result
+    except Exception as e:
+        print(f"--- FAILED to upsert session {session_data.get('session_id')} ---")
+        print(f"REASON: {e}")
+        print("----------------------------------------------------")
         return None 

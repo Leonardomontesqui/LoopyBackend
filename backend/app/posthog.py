@@ -1,13 +1,73 @@
 import requests
 import os
+import json
 from fastapi import HTTPException, Query
 from dotenv import load_dotenv
+from agents import Agent, Runner, trace, function_tool, OpenAIChatCompletionsModel
+from openai import OpenAI
+from . import database
+# from agents.models.openai import OpenAIChatCompletionsModel
+# from agents.tools import function_tool
 
 load_dotenv(override=True)
 
 api_key = os.getenv('POSTHOG_API_KEY') 
 project_api_key = os.getenv('POSTHOG_PROJECT_API_KEY')
 project_id = os.getenv('POSTHOG_PROJECT_ID')
+gemini_api_key = os.getenv('GEMINI_API_KEY')
+
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+os.environ['OPENAI_API_KEY'] = gemini_api_key
+os.environ['OPENAI_BASE_URL'] = GEMINI_BASE_URL
+
+
+gemini_client = OpenAI(
+    api_key=gemini_api_key,
+    base_url=GEMINI_BASE_URL
+)
+
+
+gemini_model = OpenAIChatCompletionsModel(model="gemini-2.0-flash", openai_client=gemini_client)
+
+@function_tool
+def analyze_session_errors(errors: list) -> dict:
+    """Analyze JavaScript console errors and generate a title and description for a bug report"""
+    error_summary = "\n".join([f"- {error['message']} (occurred {error['count']} times)" for error in errors])
+    
+    prompt = f"""
+    Analyze these JavaScript console errors from a user session and create:
+    1. A concise, descriptive title (max 60 characters)
+    2. A detailed description explaining what went wrong and potential impact
+    
+    Errors:
+    {error_summary}
+    
+    Please respond with a JSON object in this exact format:
+    {{
+        "title": "Your concise title here",
+        "description": "Your detailed description here"
+    }}
+    
+    Make sure the title is under 60 characters and the description provides actionable insights for developers.
+    """
+    
+    return {"prompt": prompt, "errors_count": len(errors)}
+
+def create_analysis_agent():
+    """Create an agent for analyzing session errors using Gemini API"""
+    analysis_instructions = """You are an expert at analyzing JavaScript console errors and creating clear, actionable titles and descriptions for bug reports. Focus on the most impactful errors and provide insights that would help developers understand and fix the issues. MAX 2 SENTENCES
+    
+    Use the analyze_session_errors tool to process the errors and generate appropriate titles and descriptions."""
+    
+    analysis_agent = Agent(
+        name="Session Error Analyzer", 
+        instructions=analysis_instructions, 
+        model=gemini_model
+    )
+    
+    return analysis_agent
 
 def get_session_recordings():
     response = requests.get(
@@ -253,9 +313,9 @@ def check_session_sharing_status(session_id: str):
             }
         }
     
-def analyze_recordings_for_errors():
+async def analyze_recordings_for_errors():
     """
-    The main workflow, now with debugging prints to show what's happening.
+    The main workflow, now with AI agent analysis for titles and descriptions.
     """
     print("Starting analysis...")
     all_recordings_response = get_session_recordings()
@@ -304,12 +364,32 @@ def analyze_recordings_for_errors():
             print(f"No unique errors could be parsed for session {session_id}, skipping.")
             continue
 
+        # Use AI agent to generate title and description
+        print(f"Generating AI analysis for session {session_id}...")
+        try:
+            # Use direct Gemini API call since it's more reliable
+            ai_analysis = direct_gemini_analysis(unique_errors)
+            print(f"AI analysis completed for session {session_id}")
+        except Exception as e:
+            print(f"AI analysis failed for session {session_id}: {e}")
+            ai_analysis = {
+                "title": f"Session {session_id} - Console Errors",
+                "description": f"Session with {len(unique_errors)} different types of console errors."
+            }
+
         session_object = {
             "session_id": session_id,
             "errors": unique_errors,
-            "embed_url": share_info.get('embed_url')
+            "embed_url": share_info.get('embed_url'),
+            "title": ai_analysis.get('title', f"Session {session_id} - Console Errors"),
+            "description": ai_analysis.get('description', f"Session with console errors."),
+            "start_time": recording.get('start_time'),
+            "end_time": recording.get('end_time')
         }
         simplified_error_sessions.append(session_object)
+
+        # Save the processed session to the database
+        database.save_processed_session(session_object)
         
     print("Analysis complete.")
     return simplified_error_sessions
@@ -358,3 +438,60 @@ def get_errors_for_session(session_id: str) -> list:
     except requests.exceptions.RequestException as e:
         print(f"Error fetching events for session {session_id}: {e}")
         return []
+
+def direct_gemini_analysis(errors: list) -> dict:
+    """Direct Gemini API call as fallback when agents library fails"""
+    error_summary = "\n".join([f"- {error['message']} (occurred {error['count']} times)" for error in errors])
+    
+    prompt = f"""
+    Analyze these JavaScript console errors from a user session and create:
+    1. A concise, descriptive title (max 60 characters)
+    2. A detailed description explaining what went wrong and potential impact
+    
+    Errors:
+    {error_summary}
+    
+    Please respond with a JSON object in this exact format:
+    {{
+        "title": "Your concise title here",
+        "description": "Your detailed description here"
+    }}
+    
+    Make sure the title is under 60 characters and the description provides actionable insights for developers.
+    """
+    
+    try:
+        response = gemini_client.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1
+        )
+        
+        result_text = response.choices[0].message.content
+        
+        # Try to parse as JSON
+        try:
+            if "{" in result_text and "}" in result_text:
+                start = result_text.find("{")
+                end = result_text.rfind("}") + 1
+                json_str = result_text[start:end]
+                return json.loads(json_str)
+            else:
+                return {
+                    "title": "Session Console Errors",
+                    "description": result_text
+                }
+        except json.JSONDecodeError:
+            return {
+                "title": "Session Console Errors",
+                "description": result_text
+            }
+            
+    except Exception as e:
+        print(f"Direct Gemini API call failed: {e}")
+        return {
+            "title": "Session Console Errors",
+            "description": f"Session with {len(errors)} different types of console errors."
+        }

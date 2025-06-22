@@ -30,3 +30,19 @@ async def get_events(
 @app.get("/get-recordings")
 async def get_recordings():
     return posthog.get_recordings()
+
+@app.post("/enable-session-sharing/{session_id}")
+async def enable_session_sharing(session_id: str):
+    """Enable sharing for a session replay and get embed code"""
+    return posthog.enable_session_sharing(session_id)
+
+@app.get("/get-session-share-info/{session_id}")
+async def get_session_share_info(session_id: str):
+    """Get sharing information for a session replay"""
+    return posthog.get_session_share_info(session_id)
+
+@app.get("/check-session-sharing/{session_id}")
+async def check_session_sharing(session_id: str):
+    """Check if sharing is enabled and get help if not"""
+    return posthog.check_session_sharing_status(session_id)
+

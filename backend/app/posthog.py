@@ -40,7 +40,7 @@ def get_events(session_id=None, limit=100):
     errors = []
     for ev in raw:
         props = ev.get("properties", {})
-        # pull out the message
+
         msg = None
         exc_list = props.get("$exception_list")
         if isinstance(exc_list, list) and exc_list:
@@ -73,14 +73,13 @@ def enable_session_sharing(session_id: str):
     if not session_id:
         raise HTTPException(400, "Session ID is required")
     
-    # According to PostHog docs: https://us.posthog.com/api/projects/{projectID}/session_recordings/{sessionID}/sharing?personal_api_key={POSTHOG_PERSONAL_API_KEY}
+
     url = f"https://us.posthog.com/api/projects/{project_id}/session_recordings/{session_id}/sharing"
     
-    # Try both API keys to see which one works
     personal_api_key = api_key
     project_api_key = os.getenv('POSTHOG_PROJECT_API_KEY')
     
-    # Use personal_api_key as query parameter, not in Authorization header
+
     params = {"personal_api_key": personal_api_key}
     
     print(f"Debug - Project ID: {project_id}")
@@ -108,7 +107,7 @@ def enable_session_sharing(session_id: str):
         access_token = result.get('access_token')
         
         if access_token:
-            # Create embed iframe code
+
             iframe_code = f'<iframe allowfullscreen width="100%" height="450" frameborder="0" src="https://app.posthog.com/embedded/{access_token}"></iframe>'
             
             return {
@@ -126,7 +125,7 @@ def enable_session_sharing(session_id: str):
             }
             
     except requests.exceptions.RequestException as e:
-        # Try with project API key if personal API key fails
+
         if "403" in str(e) and project_api_key:
             print("Trying with project API key...")
             params = {"personal_api_key": project_api_key}
@@ -163,7 +162,7 @@ def get_session_share_info(session_id: str):
     if not session_id:
         raise HTTPException(400, "Session ID is required")
     
-    # Get sharing info via PostHog API
+
     url = f"https://us.posthog.com/api/projects/{project_id}/session_recordings/{session_id}/sharing"
     params = {"personal_api_key": api_key}
     
@@ -253,3 +252,109 @@ def check_session_sharing_status(session_id: str):
                 "permissions": "Make sure the key has 'Session Recordings' and 'Sharing' permissions"
             }
         }
+    
+def analyze_recordings_for_errors():
+    """
+    The main workflow, now with debugging prints to show what's happening.
+    """
+    print("Starting analysis...")
+    all_recordings_response = get_session_recordings()
+    all_recordings = all_recordings_response.get('results', [])
+    print(f"Found {len(all_recordings)} total recordings.")
+
+    if not all_recordings:
+        return []
+
+    recordings_with_errors = [
+        rec for rec in all_recordings if rec.get('console_error_count', 0) > 0
+    ]
+    print(f"Found {len(recordings_with_errors)} recordings with console_error_count > 0.")
+
+    if not recordings_with_errors:
+        return []
+    
+    simplified_error_sessions = []
+    
+    for recording in recordings_with_errors:
+        session_id = recording.get('id')
+        if not session_id:
+            continue
+
+        print(f"--- Processing session: {session_id} ---")
+
+        error_messages = get_errors_for_session(session_id=session_id)
+        print(f"Found {len(error_messages)} raw error messages for this session.")
+
+        if not error_messages:
+            print("No error messages found, skipping.")
+            continue
+
+        share_info = enable_session_sharing(session_id)
+        
+        error_counts = {}
+        for message in error_messages:
+            if message:
+                error_counts[message] = error_counts.get(message, 0) + 1
+        
+        unique_errors = [
+            {"message": msg, "count": count} for msg, count in error_counts.items()
+        ]
+        
+        if not unique_errors:
+            print(f"No unique errors could be parsed for session {session_id}, skipping.")
+            continue
+
+        session_object = {
+            "session_id": session_id,
+            "errors": unique_errors,
+            "embed_url": share_info.get('embed_url')
+        }
+        simplified_error_sessions.append(session_object)
+        
+    print("Analysis complete.")
+    return simplified_error_sessions
+
+def get_errors_for_session(session_id: str) -> list:
+    """
+    A corrected, lean function to get only the error messages for a single session.
+    This version correctly filters by event properties and parses the error message.
+    """
+    if not api_key or not project_id:
+        raise HTTPException(400, "Missing PostHog credentials")
+
+    url = f"https://us.posthog.com/api/projects/{project_id}/events/"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    
+
+    properties_filter = f'[{{"key": "$session_id", "value": "{session_id}", "operator": "exact", "type": "event"}}]'
+    params = {
+        "event": "$exception",
+        "properties": properties_filter,
+        "limit": 500
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        
+        results = response.json().get('results', [])
+        
+        error_messages = []
+        for event in results:
+            props = event.get('properties', {})
+            msg = None
+            exc_list = props.get("$exception_list")
+            if isinstance(exc_list, list) and exc_list:
+                msg = exc_list[0].get("value")
+            else:
+                vals = props.get("$exception_values")
+                msg = vals[0] if isinstance(vals, list) and vals else None
+            
+            if msg:
+                error_messages.append(msg)
+        
+        return error_messages
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching events for session {session_id}: {e}")
+        return []

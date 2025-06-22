@@ -31,6 +31,14 @@ async def get_events(
 async def get_recordings():
     return posthog.get_recordings()
 
+@app.get("/process-sessions-with-errors")
+async def process_sessions_with_errors():
+    """
+    Analyzes all session recordings, finds ones with errors,
+    and enriches them with event data and a shareable replay link.
+    """
+    return posthog.analyze_recordings_for_errors()
+
 @app.post("/enable-session-sharing/{session_id}")
 async def enable_session_sharing(session_id: str):
     """Enable sharing for a session replay and get embed code"""

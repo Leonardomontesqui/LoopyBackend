@@ -4,8 +4,9 @@ import json
 from fastapi import HTTPException, Query
 from dotenv import load_dotenv
 from agents import Agent, Runner, trace, function_tool, OpenAIChatCompletionsModel
-from openai import OpenAI
+from openai import AsyncOpenAI
 from . import database
+from pydantic import BaseModel
 # from agents.models.openai import OpenAIChatCompletionsModel
 # from agents.tools import function_tool
 
@@ -18,18 +19,18 @@ gemini_api_key = os.getenv('GEMINI_API_KEY')
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-
-os.environ['OPENAI_API_KEY'] = gemini_api_key
-os.environ['OPENAI_BASE_URL'] = GEMINI_BASE_URL
-
-
-gemini_client = OpenAI(
+# Initialize Gemini client for the agent using AsyncOpenAI
+gemini_client = AsyncOpenAI(
     api_key=gemini_api_key,
     base_url=GEMINI_BASE_URL
 )
 
-
+# Create the model for the agent
 gemini_model = OpenAIChatCompletionsModel(model="gemini-2.0-flash", openai_client=gemini_client)
+
+class ErrorAnalysisOutput(BaseModel):
+    title: str
+    description: str
 
 @function_tool
 def analyze_session_errors(errors: list) -> dict:
@@ -57,14 +58,13 @@ def analyze_session_errors(errors: list) -> dict:
 
 def create_analysis_agent():
     """Create an agent for analyzing session errors using Gemini API"""
-    analysis_instructions = """You are an expert at analyzing JavaScript console errors and creating clear, actionable titles and descriptions for bug reports. Focus on the most impactful errors and provide insights that would help developers understand and fix the issues. MAX 2 SENTENCES
-    
-    Use the analyze_session_errors tool to process the errors and generate appropriate titles and descriptions."""
+    analysis_instructions = """You are an expert at analyzing JavaScript console errors and creating clear, actionable titles and descriptions for bug reports. Focus on the most impactful errors and provide insights that would help developers understand and fix the issues. MAX 2 SENTENCES\n\nUse the analyze_session_errors tool to process the errors and generate appropriate titles and descriptions."""
     
     analysis_agent = Agent(
         name="Session Error Analyzer", 
         instructions=analysis_instructions, 
-        model=gemini_model
+        model=gemini_model,
+        output_type=ErrorAnalysisOutput
     )
     
     return analysis_agent
@@ -367,8 +367,7 @@ async def analyze_recordings_for_errors():
         # Use AI agent to generate title and description
         print(f"Generating AI analysis for session {session_id}...")
         try:
-            # Use direct Gemini API call since it's more reliable
-            ai_analysis = direct_gemini_analysis(unique_errors)
+            ai_analysis = await analyze_errors_with_agent(unique_errors)
             print(f"AI analysis completed for session {session_id}")
         except Exception as e:
             print(f"AI analysis failed for session {session_id}: {e}")
@@ -491,6 +490,37 @@ def direct_gemini_analysis(errors: list) -> dict:
             
     except Exception as e:
         print(f"Direct Gemini API call failed: {e}")
+        return {
+            "title": "Session Console Errors",
+            "description": f"Session with {len(errors)} different types of console errors."
+        }
+
+async def analyze_errors_with_agent(errors: list) -> dict:
+    """Use the OpenAI Agent SDK to analyze errors and generate title/description"""
+    try:
+        # Create the agent
+        agent = create_analysis_agent()
+        
+        # Prepare the error data for the agent
+        error_summary = "\n".join([f"- {error['message']} (occurred {error['count']} times)" for error in errors])
+        
+        # Run the agent with the errors using the correct Runner pattern
+        result = await Runner.run(agent, f"Analyze these JavaScript console errors and create a title and description for a bug report:\n\n{error_summary}")
+        
+        # Use structured output
+        if result and hasattr(result, 'final_output') and result.final_output:
+            return {
+                "title": result.final_output.title,
+                "description": result.final_output.description
+            }
+        else:
+            return {
+                "title": "Session Console Errors",
+                "description": f"Session with {len(errors)} different types of console errors."
+            }
+            
+    except Exception as e:
+        print(f"Agent analysis failed: {e}")
         return {
             "title": "Session Console Errors",
             "description": f"Session with {len(errors)} different types of console errors."

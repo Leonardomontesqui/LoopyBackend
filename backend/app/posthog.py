@@ -342,6 +342,29 @@ async def analyze_recordings_for_errors():
 
         print(f"--- Processing session: {session_id} ---")
 
+        # Check if session already exists in database AND is completed
+        existing_session = database.get_session_by_id(session_id)
+        if existing_session:
+            # Check if session is completed (ongoing=false and end_time exists)
+            ongoing = recording.get('ongoing', True)  # Default to True if not found
+            print(ongoing)
+            if not ongoing:
+                print(f"Session {session_id} already exists in database and is completed (ongoing=false, end_time exists), skipping AI generation.")
+                # Use existing data
+                session_object = {
+                    "session_id": session_id,
+                    "errors": [{"message": error, "count": 1} for error in existing_session.get('error_tags', [])],
+                    "embed_url": existing_session.get('video_link'),
+                    "title": existing_session.get('title', f"Session {session_id} - Console Errors"),
+                    "description": existing_session.get('description', f"Session with console errors."),
+                    "start_time": existing_session.get('start_time'),
+                    "end_time": existing_session.get('end_time')
+                }
+                simplified_error_sessions.append(session_object)
+                continue
+            else:
+                print(f"Session {session_id} exists in database but is ongoing or missing end_time, will process for updates.")
+
         error_messages = get_errors_for_session(session_id=session_id)
         print(f"Found {len(error_messages)} raw error messages for this session.")
 

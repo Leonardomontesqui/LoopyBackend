@@ -107,4 +107,22 @@ def save_processed_session(session_data: Dict):
         print(f"--- FAILED to upsert session {session_data.get('session_id')} ---")
         print(f"REASON: {e}")
         print("----------------------------------------------------")
-        return None 
+        return None
+
+def get_session_by_id(session_id: str) -> Dict:
+    """Get a specific session by session_id from the posthog table"""
+    try:
+        result = supabase.table('posthog').select('*').eq('session_id', session_id).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"Error getting session {session_id}: {e}")
+        return None
+
+def session_exists(session_id: str) -> bool:
+    """Check if a session already exists in the database"""
+    try:
+        result = supabase.table('posthog').select('session_id').eq('session_id', session_id).execute()
+        return len(result.data) > 0
+    except Exception as e:
+        print(f"Error checking if session {session_id} exists: {e}")
+        return False 
